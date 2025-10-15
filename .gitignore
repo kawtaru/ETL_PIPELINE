@@ -1,0 +1,21 @@
+@"
+# Runtime / generated
+airflow_logs/
+__pycache__/
+*.pyc
+
+# Local env files
+.env
+.env.*
+docker/.env
+
+# Data folders (if you don’t want raw files in Git)
+data/raw/
+data/archive/
+data/landing/
+data/pond/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+"@ | Out-File -Encoding ascii .gitignore

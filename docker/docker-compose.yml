@@ -1,0 +1,174 @@
+# Robust Airflow: CeleryExecutor + Redis + Postgres (metadata) + MSSQL (warehouse)
+
+x-airflow-env: &airflow_env
+  AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__WEBSERVER__RBAC: "True"
+  # Airflow METADATA DB (Postgres) — required for Celery setup
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  # Celery backend & broker
+  AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AIRFLOW__CELERY__BROKER_URL: redis://redis:${REDIS_PORT}/0
+  AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "True"
+  ETL_BASE_DIR: ${ETL_BASE_DIR}
+  AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+  # Define default MSSQL connection for MsSqlHook
+  AIRFLOW_CONN_MSSQL_DEFAULT: mssql+pyodbc://sa:${MSSQL_SA_PASSWORD}@mssql:1433?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+
+services:
+  # --- Airflow metadata DB ---
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # --- Celery broker ---
+  redis:
+    image: redis:7.2-bookworm
+    container_name: redis
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: unless-stopped
+
+  # --- Your data warehouse (target DB) ---
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=${MSSQL_SA_PASSWORD}
+      - MSSQL_PID=Developer
+    ports: ["1433:1433"]
+    volumes:
+      - mssql-db-volume:/var/opt/mssql
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${MSSQL_SA_PASSWORD}", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    container_name: cloudbeaver
+    ports:
+      - "8978:8978"                 # open http://localhost:8978
+    environment:
+      # Allow initial setup without prior login (you can disable later in UI)
+      - CB_SERVER_ANONYMOUS_ACCESS=true
+      # Helps the host filter + absolute URL generation
+      - CB_SERVER_NAME=cloudbeaver-local
+      - CB_SERVER_URL=http://localhost:8978/
+      # (Optional) relax host filter if you access via another host header
+      # - CB_SERVER_CUSTOM_HOSTS=localhost,127.0.0.1
+      #
+      # Some builds accept these to auto-create admin on first run (ignored if unsupported)
+      - CB_ADMIN_NAME=admin
+      - CB_ADMIN_PASSWORD=admin
+    volumes:
+      - cloudbeaver-workspace:/opt/cloudbeaver/workspace   # persist settings
+    depends_on:
+      - postgres
+      - mssql
+    restart: unless-stopped
+
+  # --- Airflow bootstrap (creates DB schema + admin user) ---
+  airflow-init:
+    build: ./airflow
+    container_name: airflow-init
+    environment: *airflow_env
+    entrypoint: /bin/bash
+    command: -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    volumes:
+      - ../airflow_dags:/opt/airflow/dags
+      - ../airflow_logs:/opt/airflow/logs
+      - ../airflow_plugins:/opt/airflow/plugins
+      - ../data:/opt/etl/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Webserver UI ---
+  airflow-web:
+    build: ./airflow
+    container_name: airflow-web
+    environment: *airflow_env
+    command: webserver
+    ports: ["8080:8080"]
+    volumes:
+      - ../airflow_dags:/opt/airflow/dags
+      - ../airflow_logs:/opt/airflow/logs
+      - ../airflow_plugins:/opt/airflow/plugins
+      - ../data:/opt/etl/data
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --- Scheduler ---
+  airflow-scheduler:
+    build: ./airflow
+    container_name: airflow-scheduler
+    environment: *airflow_env
+    command: scheduler
+    volumes:
+      - ../airflow_dags:/opt/airflow/dags
+      - ../airflow_logs:/opt/airflow/logs
+      - ../airflow_plugins:/opt/airflow/plugins
+      - ../data:/opt/etl/data
+    depends_on:
+      airflow-web:
+        condition: service_started
+
+  # --- Celery Worker (executes tasks) ---
+  airflow-worker:
+    build: ./airflow
+    container_name: airflow-worker
+    environment: *airflow_env
+    command: celery worker
+    volumes:
+      - ../airflow_dags:/opt/airflow/dags
+      - ../airflow_logs:/opt/airflow/logs
+      - ../airflow_plugins:/opt/airflow/plugins
+      - ../data:/opt/etl/data
+    depends_on:
+      airflow-scheduler:
+        condition: service_started
+
+  # --- Triggerer (for deferrable operators) ---
+  airflow-triggerer:
+    build: ./airflow
+    container_name: airflow-triggerer
+    environment: *airflow_env
+    command: triggerer
+    volumes:
+      - ../airflow_dags:/opt/airflow/dags
+      - ../airflow_logs:/opt/airflow/logs
+      - ../airflow_plugins:/opt/airflow/plugins
+      - ../data:/opt/etl/data
+    depends_on:
+      airflow-scheduler:
+        condition: service_started
+
+volumes:
+  postgres-db-volume: {}
+  mssql-db-volume: {}
+  cloudbeaver-workspace: {}
