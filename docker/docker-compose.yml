@@ -13,7 +13,7 @@ x-airflow-env: &airflow_env
   ETL_BASE_DIR: ${ETL_BASE_DIR}
   AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
   # Define default MSSQL connection for MsSqlHook
-  AIRFLOW_CONN_MSSQL_DEFAULT: mssql+pyodbc://sa:${MSSQL_SA_PASSWORD}@mssql:1433?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+  AIRFLOW_CONN_MSSQL_DEFAULT: mssql://sa:${MSSQL_SA_PASSWORD}@mssql:1433?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
 
 services:
   # --- Airflow metadata DB ---
