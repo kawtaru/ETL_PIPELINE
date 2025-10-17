@@ -1,0 +1,85 @@
+Corps ;Activité;Produit;Variété;Pondérations variétés produits des prix de vente moyens TTC (DH);Pondérations  produits actvités des prix de vente moyens TTC (DH);Pondérations activités sous-corps de métiers des prix de vente moyens TTC (DH);Pondérations sous-corps au corps de métiers des prix de vente moyens TTC (DH);Pondérations corps de métiers au secteur des prix de vente moyens TTC (DH)
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Agglomérés;15-20/20/40-50 ;0.88;0.27;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Agglomérés;7,5-10/20/40-50;0.12;0.27;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Hourdis;12-16/20/52 ;0.75;0.23;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Hourdis;20/20/52;0.25;0.23;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Buse en béton ou en PVC;Diam 100 à 150 mm;0.25;0.02;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Buse en béton ou en PVC;Diam 200 à 300 mm;0.75;0.02;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Bordures ;T3 ou T4;1;0.01;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Poutres préfabriquées;12-16/20;0.8;0.25;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;Poutres préfabriquées;20/20;0.2;0.25;0.26;1;0.48
+Gros œuvre;Agglomérés et articles en ciment ou en PVC;BPE;20/20;1;0.22;0.26;1;0.48
+Gros œuvre;Ciment;Ciment CPJ 35;CPJ 35;1;0.4;0.24;1;0.48
+Gros œuvre;Ciment;Ciment CPJ 45;CPJ 45;1;0.6;0.24;1;0.48
+Gros œuvre;Matériaux de construction en terre cuite;Briques creuses;6T 7x15x28;0.7;0.99;0.1;1;0.48
+Gros œuvre;Matériaux de construction en terre cuite;Briques creuses;8T;0.3;0.99;0.1;1;0.48
+Gros œuvre;Matériaux de construction en terre cuite;Tuiles;Traditionnel ou industriel;1;0.01;0.1;1;0.48
+Gros œuvre;Produits issus des minéraux;Sables;Mer, Oued ou concassage;1;0.65;0.1;1;0.48
+Gros œuvre;Produits issus des minéraux;Gravettes;5/15 - 15/25;1;0.3;0.1;1;0.48
+Gros œuvre;Produits issus des minéraux;Moellons;Pierres;1;0.05;0.1;1;0.48
+Gros œuvre;Acier;Acier à haute adhérence ;Diam 8 ou 10;0.3;0.85;0.3;1;0.48
+Gros œuvre;Acier;Acier à haute adhérence ;Diam 12 àu 14;0.7;0.85;0.3;1;0.48
+Gros œuvre;Acier;Acier doux;Diam 6;1;0.15;0.3;1;0.48
+Étanchéité;Produits d'étanchéité;Bitume;Diam 6;1;0.4;1;0.07;0.52
+Étanchéité;Produits d'étanchéité;Carton bitumé;27 S;0.7;0.6;1;0.07;0.52
+Étanchéité;Produits d'étanchéité;Carton bitumé;36 S;0.3;0.6;1;0.07;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Carreaux grès;33x33 à  50x50 ;1;0.35;0.85;0.2;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Carreaux granito;33x33 & similraires;1;0.35;0.85;0.2;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Carreaux ciment ;20x20;1;0.05;0.85;0.2;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Carreaux de faïence;15x15 à 20x60;1;0.1;0.85;0.2;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Parquet;Stratifié AC3;1;0.1;0.85;0.2;0.52
+Revêtement ;Articles divers en céramique, ciment et bois;Plinthe;Grès;1;0.05;0.85;0.2;0.52
+Revêtement ;Produits en marbre et granit;Marbre local;Qualité économique ;0.8;0.75;0.15;0.2;0.52
+Revêtement ;Produits en marbre et granit;Marbre local;Qualité moyenne ;0.2;0.75;0.15;0.2;0.52
+Revêtement ;Produits en marbre et granit;Marbre importé;Qualité économique;1;0.15;0.15;0.2;0.52
+Revêtement ;Produits en marbre et granit;Granit;Local;0.8;0.1;0.15;0.2;0.52
+Revêtement ;Produits en marbre et granit;Granit;Importé;0.2;0.1;0.15;0.2;0.52
+Menuiserie quincaillerie ;Bois;Sapin rouge ;2ème Choix;1;0.5;0.32;0.27;0.52
+Menuiserie quincaillerie ;Bois;Contre-plaqué;4 mm;1;0.4;0.32;0.27;0.52
+Menuiserie quincaillerie ;Bois;Hêtre;Français ou Roumain;1;0.05;0.32;0.27;0.52
+Menuiserie quincaillerie ;Bois;Cèdre;2ème Choix;1;0.05;0.32;0.27;0.52
+Menuiserie quincaillerie ;Quincaillerie;Serrure;Standard;1;0.35;0.05;0.27;0.52
+Menuiserie quincaillerie ;Quincaillerie;Poignet;Standard;1;0.4;0.05;0.27;0.52
+Menuiserie quincaillerie ;Quincaillerie;Paumelle;Standard;1;0.25;0.05;0.27;0.52
+Menuiserie quincaillerie ;Aluminium châssis ;Aluminium châssis ;Qualité Economique ;1;0.6;0.42;0.27;0.52
+Menuiserie quincaillerie ;Aluminium châssis ;Aluminium châssis ;Qualité Moyenne ;1;0.4;0.42;0.27;0.52
+Menuiserie quincaillerie ;Volet roulant;Volet roulant ;Aluminium ;1;0.3;0.21;0.27;0.52
+Menuiserie quincaillerie ;Volet roulant;Volet roulant ;PVC ;1;0.7;0.21;0.27;0.52
+Plomberie Sanitaire;Retube;Canalisation en retube;Diam 16 à 20;1;1;0.1;0.2;0.52
+Plomberie Sanitaire;PPR;Tube PPR;Diam 16;0.8;1;0.1;0.2;0.52
+Plomberie Sanitaire;PPR;Tube PPR;Diam 20;0.2;1;0.1;0.2;0.52
+Plomberie Sanitaire;Cuivre;Tuyaux;Diam 10/12;0.75;1;0.05;0.2;0.52
+Plomberie Sanitaire;Cuivre;Tuyaux;Diam 12/14;0.25;1;0.05;0.2;0.52
+Plomberie Sanitaire;Plastique;Buse en PVC;Diam 32 à 50 mm;0.25;1;0.15;0.2;0.52
+Plomberie Sanitaire;Plastique;Buse en PVC;Diam 100 à 125;0.75;1;0.15;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Lavabo;Sur consol;1;0.11;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Receveur douche ;Standard;1;0.11;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Évier;1 Compartiment;1;0.08;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Siège à l'anglaise;Standard;1;0.2;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Siège à la turque;Standard;1;0.05;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Baignoire;Tôle ou PVC;1;0.23;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Bidet;Standard;1;0.1;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Robinetterie;R. Simple;0.5;0.12;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Robinetterie;R. d'Arrêt;0.1;0.12;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Robinetterie;R. Mélangeur;0.3;0.12;0.6;0.2;0.52
+Plomberie Sanitaire;Articles et produits sanitaires;Robinetterie;R. de chasse;0.1;0.12;0.6;0.2;0.52
+Électricité;Articles électricités;Tubage;Diam 13;0.5;0.17;1;0.12;0.52
+Électricité;Articles électricités;Tubage;Diam 11;0.35;0.17;1;0.12;0.52
+Électricité;Articles électricités;Tubage;Diam 9;0.15;0.17;1;0.12;0.52
+Électricité;Articles électricités;Filerie et câble;Sect. 1,5 mm;0.4;0.28;1;0.12;0.52
+Électricité;Articles électricités;Filerie et câble;Sect. 2,5 mm;0.6;0.28;1;0.12;0.52
+Électricité;Articles électricités;Interrupteur;Standard;1;0.13;1;0.12;0.52
+Électricité;Articles électricités;Prise;Standard;1;0.12;1;0.12;0.52
+Électricité;Articles électricités;Tableau;Plastique (20);1;0.3;1;0.12;0.52
+Peinture, vitrerie et plâtre;Peinture;Peinture;Vinylique;0.4;0.55;0.78;0.14;0.52
+Peinture, vitrerie et plâtre;Peinture;Peinture;Mat;0.6;0.55;0.78;0.14;0.52
+Peinture, vitrerie et plâtre;Peinture;Vernis;2ème choix  ;1;0.05;0.78;0.14;0.52
+Peinture, vitrerie et plâtre;Peinture;Laqué;Laqué;1;0.15;0.78;0.14;0.52
+Peinture, vitrerie et plâtre;Peinture;Enduit peinture;Laqué;1;0.25;0.78;0.14;0.52
+Peinture, vitrerie et plâtre;Chaux et Plâtre;Plâtre;Sac 40 Kg;1;0.8;0.02;0.14;0.52
+Peinture, vitrerie et plâtre;Chaux et Plâtre;Chaux;Sac 40Kg;1;0.2;0.02;0.14;0.52
+Peinture, vitrerie et plâtre;Verre;Demi Double ;3 à 4 mm Clair ;0.7;0.55;0.2;0.14;0.52
+Peinture, vitrerie et plâtre;Verre;Demi Double ;3 à 4 mm Couleur;0.3;0.55;0.2;0.14;0.52
+Peinture, vitrerie et plâtre;Verre;Double;6 mm Clair;0.7;0.45;0.2;0.14;0.52
+Peinture, vitrerie et plâtre;Verre;Double;6 mm Couleur;0.2;0.45;0.2;0.14;0.52
+Peinture, vitrerie et plâtre;Verre;Double;Armé (6 à 8 mm) ;0.1;0.45;0.2;0.14;0.52

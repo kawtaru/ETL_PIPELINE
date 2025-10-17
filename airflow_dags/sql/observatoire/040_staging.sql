@@ -1,0 +1,45 @@
+-- Create staging schema & tables
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'stg')
+    EXEC('CREATE SCHEMA stg');
+
+IF OBJECT_ID('stg.PRIX_INDICE_RAW','U') IS NULL
+CREATE TABLE stg.PRIX_INDICE_RAW(
+    source_file NVARCHAR(300) NOT NULL,
+    agglomeration NVARCHAR(200) NULL,
+    produit NVARCHAR(200) NULL,
+    variete NVARCHAR(200) NULL,
+    annee INT NULL,
+    type_indice NVARCHAR(20) NULL,     -- 'indice' | 'prix'
+    valeur_indice DECIMAL(18,6) NULL,
+    prix_moyen DECIMAL(18,6) NULL,
+    load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+IF OBJECT_ID('stg.PONDERATION_VILLE_RAW','U') IS NULL
+CREATE TABLE stg.PONDERATION_VILLE_RAW(
+    source_file NVARCHAR(300) NOT NULL,
+    ville NVARCHAR(200) NOT NULL,
+    variete NVARCHAR(200) NOT NULL,
+    annee INT NOT NULL,
+    poids DECIMAL(18,6) NOT NULL,
+    load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+IF OBJECT_ID('stg.PONDERATION_REGION_RAW','U') IS NULL
+CREATE TABLE stg.PONDERATION_REGION_RAW(
+    source_file NVARCHAR(300) NOT NULL,
+    region NVARCHAR(200) NOT NULL,
+    variete NVARCHAR(200) NOT NULL,
+    annee INT NOT NULL,
+    poids DECIMAL(18,6) NOT NULL,
+    load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_STG_PI_KEYS' AND object_id=OBJECT_ID('stg.PRIX_INDICE_RAW'))
+    CREATE INDEX IX_STG_PI_KEYS ON stg.PRIX_INDICE_RAW(agglomeration, produit, variete, annee);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_STG_PV_KEYS' AND object_id=OBJECT_ID('stg.PONDERATION_VILLE_RAW'))
+    CREATE INDEX IX_STG_PV_KEYS ON stg.PONDERATION_VILLE_RAW(ville, variete, annee);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_STG_PR_KEYS' AND object_id=OBJECT_ID('stg.PONDERATION_REGION_RAW'))
+    CREATE INDEX IX_STG_PR_KEYS ON stg.PONDERATION_REGION_RAW(region, variete, annee);

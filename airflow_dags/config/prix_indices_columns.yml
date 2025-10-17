@@ -1,0 +1,15 @@
+indices:
+  ville: ["agglomération", "agglomeration", "ville"]
+  produit: ["produit"]
+  variete: ["variete", "variété"]
+  year_regex: "^(19|20)\\d{2}$"
+ponderation_ville:
+  ville: ["ville", "agglomeration", "agglomération"]
+  variete: ["variete", "variété"]
+  annee: ["annee", "année", "year"]
+  poids: ["poids", "weight"]
+ponderation_region:
+  region: ["region", "région"]
+  variete: ["variete", "variété"]
+  annee: ["annee", "année", "year"]
+  poids: ["poids", "weight"]
