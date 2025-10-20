@@ -43,3 +43,26 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_STG_PV_KEYS' AND object_
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_STG_PR_KEYS' AND object_id=OBJECT_ID('stg.PONDERATION_REGION_RAW'))
     CREATE INDEX IX_STG_PR_KEYS ON stg.PONDERATION_REGION_RAW(region, variete, annee);
+-- 1) Ajouter les colonnes manquantes (idempotent)
+IF COL_LENGTH('stg.PRIX_INDICE_RAW','niveau') IS NULL
+  ALTER TABLE stg.PRIX_INDICE_RAW ADD niveau NVARCHAR(16) NULL;   -- 'VILLE' | 'REGION' | 'NATIONAL'
+
+IF COL_LENGTH('stg.PRIX_INDICE_RAW','region') IS NULL
+  ALTER TABLE stg.PRIX_INDICE_RAW ADD region NVARCHAR(200) NULL;  -- rempli seulement quand niveau='REGION'
+
+-- 2) (Optionnel) Initialiser l'historique existant : si tu n'as chargé jusqu'ici que des villes
+-- UPDATE stg.PRIX_INDICE_RAW SET niveau='VILLE' WHERE niveau IS NULL;
+
+-- 3) Index de portée (ne remplace pas l'existant ; on ajoute un index pour les nouveaux filtres)
+IF NOT EXISTS (
+  SELECT 1 FROM sys.indexes 
+  WHERE name = N'IX_STG_PI_SCOPE' 
+    AND object_id = OBJECT_ID(N'stg.PRIX_INDICE_RAW')
+)
+BEGIN
+  CREATE INDEX IX_STG_PI_SCOPE
+  ON stg.PRIX_INDICE_RAW(niveau, region, agglomeration, annee);
+END;
+
+-- L’index d’origine sur (agglomeration, produit, variete, annee) peut rester
+-- (il est créé plus bas dans ton script si absent).

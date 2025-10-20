@@ -184,11 +184,27 @@ def stage_load_prix_indices(**ctx):
                             yv = int(str(yv).strip())
                         except Exception:
                             continue
+                        """
+\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ vi\ =\ r\.get\(index_col\)\ if\ \(index_col\ is\ not\ None\ and\ index_col\ in\ df\.columns\)\ else\ None`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ pm\ =\ r\.get\(price_col\)\ if\ \(price_col\ is\ not\ None\ and\ price_col\ in\ df\.columns\)\ else\ None`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \#\ Determine\ geographic\ scope\ \(niveau/region/agglomeration\)`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ is_national\ =\ "national"\ in\ path\.lower\(\)`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ val_geo\ =\ str\(r\.get\(aggl_col_l,\ ""\)\)\.strip\(\)\ if\ aggl_col_l\ else\ ""`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ is_national:`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ val_geo:`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ niveau\ =\ "REGION";\ region\ =\ val_geo;\ aggl\ =\ None`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ else:`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ niveau\ =\ "NATIONAL";\ region\ =\ None;\ aggl\ =\ None`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ else:`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ niveau\ =\ "VILLE";\ region\ =\ None;\ aggl\ =\ val_geo`n`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ long_rows\.append\(\{`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "source_file":\ os\.path\.basename\(path\),`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "niveau":\ niveau,`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "region":\ region,`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "agglomeration":\ aggl,`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "produit":\ str\(r\.get\(prod_col_l,\ ""\)\)\.strip\(\)\ if\ prod_col_l\ else\ "",`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "variete":\ str\(r\.get\(var_col_l,\ ""\)\)\.strip\(\)\ if\ var_col_l\ else\ "",`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "annee":\ yv,`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "type_indice":\ "indice",`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "valeur_indice":\ float\(vi\)\ if\ \(vi\ is\ not\ None\ and\ pd\.notna\(vi\)\)\ else\ None,`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "prix_moyen":\ float\(pm\)\ if\ \(pm\ is\ not\ None\ and\ pd\.notna\(pm\)\)\ else\ None`n\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ }\)
+                        """
                         vi = r.get(index_col) if (index_col is not None and index_col in df.columns) else None
                         pm = r.get(price_col) if (price_col is not None and price_col in df.columns) else None
+                        # Determine geographic scope (niveau/region/agglomeration)
+                        is_national = "national" in path.lower()
+                        val_geo = str(r.get(aggl_col_l, "")).strip() if aggl_col_l else ""
+                        if is_national:
+                            if val_geo:
+                                niveau = "REGION"; region = val_geo; aggl = None
+                            else:
+                                niveau = "NATIONAL"; region = None; aggl = None
+                        else:
+                            niveau = "VILLE"; region = None; aggl = val_geo
+
                         long_rows.append({
                             "source_file": os.path.basename(path),
-                            "agglomeration": str(r.get(aggl_col_l, "")).strip(),
+                            "niveau": niveau,
+                            "region": region,
+                            "agglomeration": aggl,
                             "produit": str(r.get(prod_col_l, "")).strip() if prod_col_l else "",
                             "variete": str(r.get(var_col_l, "")).strip() if var_col_l else "",
                             "annee": yv,
@@ -593,7 +609,7 @@ def dq_checks(**ctx):
     path = os.path.join(report_dir, f"dq_{_slug(ctx['run_id'])}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
-    logger.info(f"DQ Report → {path}\n{json.dumps(metrics, indent=2, ensure_ascii=False)}")
+    logger.info(f"DQ Report → {path}`n{json.dumps(metrics, indent=2, ensure_ascii=False)}")
 
 def archive_inputs(**ctx):
     src_zip = ctx["ti"].xcom_pull(key="src_zip", task_ids="detect_zip")
@@ -658,3 +674,4 @@ with DAG(
     t_up_refs   >> [t_load_indice, t_load_pond]
     [t_load_indice, t_load_pond] >> t_dq
     t_dq >> t_archive
+
