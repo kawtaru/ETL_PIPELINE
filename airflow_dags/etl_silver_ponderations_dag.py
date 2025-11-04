@@ -1,298 +1,229 @@
 # pyright: reportMissingImports=false
+"""
+etl_silver_ponderations_dag.py - CORRECTED VERSION
+Silver layer: Load ponderation (weight) CSV files into staging tables
+
+Features:
+  - Robust CSV reading with encoding/separator auto-detection
+  - Dynamic column creation from CSV headers
+  - Preserves original column names exactly as in CSV
+"""
+
+import logging
+import os
 from datetime import datetime
-import os, re, unicodedata
 from pathlib import Path
+
 import pandas as pd
+from sqlalchemy import types as sa_types
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
-# Compat SqlHook
-try:
-    from airflow.providers.common.sql.hooks.sql import SqlHook
-except Exception:
-    try:
-        from airflow.providers.microsoft.mssql.hooks.mssql import MsSqlHook as SqlHook
-    except Exception:
-        from airflow.providers.common.sql.hooks.sql import DbApiHook as SqlHook
+import config
+import db_utils
 
-# ---------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------
-STAGING_DB = os.environ.get("ETL_STAGING_DB", "OBS_STAGING")
-BASE_DIR   = os.environ.get("ETL_BASE_DIR", "/opt/etl/data")
-POND_DIR   = os.path.join(BASE_DIR, "ponderations")
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# DDL
-# ---------------------------------------------------------------------
-DDL = r"""
-IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='stg') EXEC('CREATE SCHEMA stg');
+# =====================================================================
+# FILE CONFIGURATION
+# =====================================================================
+FILE_PONDERATION_VILLES = config.PONDERATION_DIR / "ponderations_villes_regions_output.csv"
+FILE_PONDERATION_MC = config.PONDERATION_DIR / "ponderation_MC_prixindice.csv"
 
-IF OBJECT_ID('stg.POND_VILLE_BASE','U') IS NULL
-CREATE TABLE stg.POND_VILLE_BASE(
-  ville_raw NVARCHAR(200) NOT NULL,
-  region_raw NVARCHAR(200) NULL,
-  variete_raw NVARCHAR(200) NULL,
-  poids DECIMAL(18,6) NOT NULL,
-  source_file NVARCHAR(256) NULL,
-  load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-);
-
-IF OBJECT_ID('stg.POND_VARIETE_BASE','U') IS NULL
-CREATE TABLE stg.POND_VARIETE_BASE(
-  variete_raw NVARCHAR(200) NOT NULL,
-  poids DECIMAL(18,6) NOT NULL,
-  source_file NVARCHAR(256) NULL,
-  load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-);
-
-IF OBJECT_ID('stg.PONDERATION_VILLE_RAW','U') IS NULL
-CREATE TABLE stg.PONDERATION_VILLE_RAW(
-  ville NVARCHAR(200) NOT NULL,
-  variete NVARCHAR(200) NOT NULL,
-  annee INT NOT NULL,
-  poids DECIMAL(18,6) NOT NULL,
-  source_file NVARCHAR(256) NULL,
-  load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-  CONSTRAINT PK_POND_VILLE_RAW PRIMARY KEY (ville, variete, annee)
-);
-
-IF OBJECT_ID('stg.PONDERATION_REGION_RAW','U') IS NULL
-CREATE TABLE stg.PONDERATION_REGION_RAW(
-  region NVARCHAR(200) NOT NULL,
-  variete NVARCHAR(200) NOT NULL,
-  annee INT NOT NULL,
-  poids DECIMAL(18,6) NOT NULL,
-  source_file NVARCHAR(256) NULL,
-  load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-  CONSTRAINT PK_POND_REGION_RAW PRIMARY KEY (region, variete, annee)
-);
-"""
-
-# ---------------------------------------------------------------------
+# =====================================================================
 # HELPERS
-# ---------------------------------------------------------------------
-def _norm(s):
-    """Remove accents, compress spaces, uppercase."""
-    if s is None:
-        return ""
-    s = unicodedata.normalize("NFKD", str(s))
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r"\s+", " ", s).strip()
-    return s.upper()
+# =====================================================================
+def sql_quote_ident(name: str) -> str:
+    """Quote SQL Server identifier, preserving accents/spaces."""
+    return f"[{str(name).replace(']', ']]')}]"
 
-def _find_one(patterns):
-    for pat in patterns:
-        files = sorted(Path(POND_DIR).glob(pat))
-        if files:
-            return str(files[0])
-    return None
 
-def _read_any_table(path):
-    if path is None:
-        return None
-    if path.lower().endswith((".xlsx", ".xls")):
-        return pd.read_excel(path, dtype=str).fillna("")
-    for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
-        try:
-            return pd.read_csv(path, sep=None, engine="python", dtype=str, encoding=enc).fillna("")
-        except Exception:
-            continue
-    raise ValueError(f"Cannot read file: {path}")
+def read_csv_robust(path: str) -> pd.DataFrame:
+    """Read CSV with auto-detection of encoding and separator."""
+    for sep in config.CSV_SEPARATORS:
+        for enc in config.CSV_ENCODINGS:
+            try:
+                df = pd.read_csv(
+                    path,
+                    sep=sep,
+                    encoding=enc,
+                    dtype=str,
+                    keep_default_na=False,
+                )
+                logger.info(f"✓ Read CSV with sep='{sep}', encoding='{enc}'")
+                return df
+            except Exception:
+                continue
+    
+    raise ValueError(f"Cannot read CSV with any encoding/separator: {path}")
 
-# ---------------------------------------------------------------------
+
+def create_table_from_csv(table_full: str, df: pd.DataFrame) -> None:
+    """
+    Create SQL table with exact CSV headers as NVARCHAR(MAX).
+    Drops and truncates if exists.
+    """
+    schema, table = table_full.split(".", 1)
+    
+    # Build column list
+    cols = ",\n        ".join(
+        f"{sql_quote_ident(c)} NVARCHAR(MAX) NULL" for c in df.columns
+    )
+    
+    ddl = f"""
+    USE [{config.STAGING_DB}];
+    
+    IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='{schema}')
+        EXEC('CREATE SCHEMA {schema}');
+    
+    IF OBJECT_ID('{table_full}', 'U') IS NOT NULL
+        DROP TABLE {table_full};
+    
+    CREATE TABLE {table_full} (
+        {cols}
+    );
+    
+    TRUNCATE TABLE {table_full};
+    """
+    
+    db_utils.execute_sql_with_transaction(ddl, schema=config.STAGING_DB)
+    logger.info(f"✓ Created table {table_full} with {len(df.columns)} columns")
+
+
+def insert_csv_data(table_full: str, df: pd.DataFrame) -> None:
+    """Insert CSV data with NVARCHAR(MAX) for all columns."""
+    dtype_map = {c: sa_types.UnicodeText() for c in df.columns}
+    engine = db_utils.make_sqlalchemy_engine(schema=config.STAGING_DB)
+    
+    schema, table = table_full.split(".", 1)
+    
+    df.to_sql(
+        table,
+        engine,
+        schema=schema,
+        if_exists="append",
+        index=False,
+        chunksize=config.BATCH_SIZE,
+        dtype=dtype_map,
+    )
+    logger.info(f"✓ Inserted {len(df)} rows into {table_full}")
+
+
+# =====================================================================
 # TASKS
-# ---------------------------------------------------------------------
-def ddl(**_):
-    hook = SqlHook(conn_id="mssql_default", schema=STAGING_DB)
-    hook.run(DDL)
-    print("✅ DDL ensured for ponderation tables.")
+# =====================================================================
+def task_ensure_db_schema(**ctx):
+    """Ensure database and schema exist."""
+    ddl = f"""
+    IF DB_ID(N'{config.STAGING_DB}') IS NULL
+        CREATE DATABASE [{config.STAGING_DB}];
+    
+    USE [{config.STAGING_DB}];
+    
+    IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='stg')
+        EXEC('CREATE SCHEMA stg');
+    """
+    db_utils.execute_sql_with_autocommit(ddl, config.MSSQL_CONN_ID)
+    logger.info("✓ Ensured database and schema exist")
 
-def load_city_base(**ctx):
-    """Load ponderations_villes_regions_output.(csv|xlsx)"""
-    hook = SqlHook(conn_id="mssql_default", schema=STAGING_DB)
-    city_path = _find_one([
-        "ponderations_villes_regions_output.*",
-        "ponderations*ville*region*.*",
-        "*villes*regions*pond*.*"
-    ])
-    if not city_path:
-        print("⚠️ No city ponderation file found in", POND_DIR)
-        ctx["ti"].xcom_push(key="city_rows", value=0)
+
+def task_load_ponderation_villes(**ctx):
+    """Load ponderation villes CSV."""
+    if not FILE_PONDERATION_VILLES.exists():
+        logger.warning(f"File not found: {FILE_PONDERATION_VILLES} (skipping)")
+        ctx["ti"].xcom_push(key="ponderation_villes_rows", value=0)
         return
-
-    df = _read_any_table(city_path)
-
-    # Normalize headers (remove accents + spaces)
-    def _norm_header(h):
-        s = unicodedata.normalize("NFKD", str(h))
-        s = "".join(c for c in s if not unicodedata.combining(c))
-        s = s.strip().lower()
-        s = re.sub(r"\s+", " ", s)
-        return s
-
-    norm2orig = {_norm_header(c): c for c in df.columns}
-
-    def pick(*names):
-        for n in names:
-            key = _norm_header(n)
-            if key in norm2orig:
-                return norm2orig[key]
-        for key in norm2orig:
-            if any(n in key for n in names):
-                return norm2orig[key]
-        return None
-
-    c_region = pick("region", "région")
-    c_ville  = pick("agglomeration", "agglomération", "ville")
-    c_poids  = pick("poids", "pond", "weight")
-
-    if not (c_ville and c_poids):
-        raise ValueError(f"[Ponderations/Ville] Missing required columns in {city_path}. Got={df.columns.tolist()}")
-
-    out = pd.DataFrame({
-        "ville_raw":   df[c_ville].astype(str).str.strip(),
-        "region_raw":  (df[c_region].astype(str).str.strip() if c_region else ""),
-        "variete_raw": "",
-        "poids":       pd.to_numeric(df[c_poids].astype(str).str.replace(",", "."), errors="coerce"),
-        "source_file": city_path
-    })
-    out = out[(out["ville_raw"]!="") & (out["poids"].notna())]
-    out["poids"] = out["poids"].astype(float)
-
-    hook.run("TRUNCATE TABLE stg.POND_VILLE_BASE;")
-    engine = hook.get_sqlalchemy_engine()
-    out.to_sql("POND_VILLE_BASE", engine, schema="stg", if_exists="append", index=False)
-    ctx["ti"].xcom_push(key="city_rows", value=len(out))
-    print(f"✅ Loaded {len(out)} rows from {city_path}")
-
-def load_variete_base(**ctx):
-    """Load ponderation_MC_prixindice.(xlsx|csv)"""
-    hook = SqlHook(conn_id="mssql_default", schema=STAGING_DB)
-    var_path = _find_one([
-        "ponderation_MC_prixindice.*",
-        "ponderation*prixind*.*",
-        "*variet*pond*.*"
-    ])
-    if not var_path:
-        print("⚠️ No varieté ponderation file found in", POND_DIR)
-        ctx["ti"].xcom_push(key="var_rows", value=0)
+    
+    logger.info(f"Reading: {FILE_PONDERATION_VILLES}")
+    df = read_csv_robust(str(FILE_PONDERATION_VILLES))
+    
+    if df.empty:
+        logger.warning("CSV is empty")
+        ctx["ti"].xcom_push(key="ponderation_villes_rows", value=0)
         return
+    
+    logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns from CSV")
+    logger.info(f"Sample columns: {df.columns.tolist()[:5]}")
+    logger.info(f"Sample data:\n{df.head(2).to_string()}")
+    
+    # Create table and insert
+    create_table_from_csv(config.SILVER_PONDERATION_VILLE, df)
+    insert_csv_data(config.SILVER_PONDERATION_VILLE, df)
+    
+    ctx["ti"].xcom_push(key="ponderation_villes_rows", value=len(df))
 
-    df = _read_any_table(var_path)
-    def _norm_header(h):
-        s = unicodedata.normalize("NFKD", str(h))
-        s = "".join(c for c in s if not unicodedata.combining(c))
-        return re.sub(r"\s+", " ", s.strip().lower())
 
-    norm2orig = {_norm_header(c): c for c in df.columns}
-    c_variete = next((norm2orig[k] for k in norm2orig if "variet" in k or "variété" in k), None)
-    c_poids   = next((norm2orig[k] for k in norm2orig if "poids" in k or "pond" in k or "weight" in k), None)
-
-    if not (c_variete and c_poids):
-        raise ValueError(f"[Ponderations/Variete] Columns not found in {var_path}: {df.columns.tolist()}")
-
-    out = pd.DataFrame({
-        "variete_raw": df[c_variete].astype(str).str.strip(),
-        "poids": pd.to_numeric(df[c_poids].astype(str).str.replace(",", "."), errors="coerce"),
-        "source_file": var_path
-    }).dropna(subset=["variete_raw","poids"])
-
-    hook.run("TRUNCATE TABLE stg.POND_VARIETE_BASE;")
-    engine = hook.get_sqlalchemy_engine()
-    out.to_sql("POND_VARIETE_BASE", engine, schema="stg", if_exists="append", index=False)
-    ctx["ti"].xcom_push(key="var_rows", value=len(out))
-    print(f"✅ Loaded {len(out)} varieté rows from {var_path}")
-
-def build_ville_region_raw(**ctx):
-    """Cross city × varieté × year, normalize, build both raw tables"""
-    hook = SqlHook(conn_id="mssql_default", schema=STAGING_DB)
-    engine = hook.get_sqlalchemy_engine()
-    df_city = pd.read_sql("SELECT * FROM stg.POND_VILLE_BASE", engine)
-    df_var  = pd.read_sql("SELECT * FROM stg.POND_VARIETE_BASE", engine)
-
-    if df_city.empty:
-        print("⚠️ No city ponderations loaded.")
+def task_load_ponderation_mc(**ctx):
+    """Load ponderation MC (Marche de Constructive) CSV."""
+    if not FILE_PONDERATION_MC.exists():
+        logger.warning(f"File not found: {FILE_PONDERATION_MC} (skipping)")
+        ctx["ti"].xcom_push(key="ponderation_mc_rows", value=0)
         return
+    
+    logger.info(f"Reading: {FILE_PONDERATION_MC}")
+    df = read_csv_robust(str(FILE_PONDERATION_MC))
+    
+    if df.empty:
+        logger.warning("CSV is empty")
+        ctx["ti"].xcom_push(key="ponderation_mc_rows", value=0)
+        return
+    
+    logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns from CSV")
+    logger.info(f"Sample columns: {df.columns.tolist()[:5]}")
+    logger.info(f"Sample data:\n{df.head(2).to_string()}")
+    
+    # Create table and insert
+    create_table_from_csv(config.SILVER_PONDERATION_MC, df)
+    insert_csv_data(config.SILVER_PONDERATION_MC, df)
+    
+    ctx["ti"].xcom_push(key="ponderation_mc_rows", value=len(df))
 
-    if df_var.empty:
-        raise ValueError("Variety base empty — cannot build ponderations.")
 
-    # Cross-join (static weights)
-    df_city["__key"] = 1
-    df_var["__key"] = 1
-    df = df_city.merge(df_var, on="__key", suffixes=("_city","_var")).drop(columns="__key")
-    df["poids"] = df["poids_city"] * df["poids_var"]
+def task_report(**ctx):
+    """Report summary."""
+    villes_rows = ctx["ti"].xcom_pull(key="ponderation_villes_rows", task_ids="task_load_ponderation_villes") or 0
+    mc_rows = ctx["ti"].xcom_pull(key="ponderation_mc_rows", task_ids="task_load_ponderation_mc") or 0
+    
+    logger.info(f"✓ SILVER PONDERATIONS: villes={villes_rows}, mc={mc_rows}")
+    
+    if villes_rows == 0 and mc_rows == 0:
+        logger.warning("⚠️ No ponderation data loaded")
 
-    for col in ["ville_raw","region_raw","variete_raw","variete_raw_var"]:
-        if col in df.columns:
-            df[col] = df[col].apply(_norm)
 
-    # Expand to all years in raw prices
-    years = pd.read_sql("SELECT DISTINCT annee FROM stg.PRIX_INDICE_RAW ORDER BY annee", engine)["annee"].dropna().astype(int).tolist()
-    df_years = pd.DataFrame({"annee": years})
-    df_years["__key"] = 1
-    df["__key"] = 1
-    df = df.merge(df_years, on="__key").drop(columns="__key")
-
-    # Normalize per (ville, annee)
-    df["sum_p"] = df.groupby(["ville_raw","annee"])["poids"].transform("sum")
-    df["poids"] = df["poids"] / df["sum_p"]
-    # Use whichever varieté column exists
-    var_col = "variete_raw_var" if "variete_raw_var" in df.columns else "variete_raw"
-    out_ville = df[["ville_raw", var_col, "annee", "poids", "source_file_city"]]\
-        .rename(columns={"ville_raw":"ville", var_col:"variete", "source_file_city":"source_file"})
-
-    # Aggregate by region
-    has_region = (df["region_raw"].fillna("").str.strip() != "").any()
-    if has_region:
-        df_r = df[df["region_raw"]!=""].copy()
-        df_r["sum_r"] = df_r.groupby(["region_raw","annee"])["poids"].transform("sum")
-        df_r["poids"] = df_r["poids"] / df_r["sum_r"]
-        out_region = df_r[["region_raw", var_col, "annee", "poids", "source_file_city"]]\
-            .rename(columns={"region_raw":"region", var_col:"variete", "source_file_city":"source_file"})
-    else:
-        out_region = pd.DataFrame(columns=["region","variete","annee","poids","source_file"])
-
-    # --- Deduplicate before insert to avoid PK violations ---
-    out_ville = (
-    out_ville.groupby(["ville", "variete", "annee"], as_index=False)
-    .agg({"poids": "mean", "source_file": "first"})
-    )
-
-    hook.run("TRUNCATE TABLE stg.PONDERATION_VILLE_RAW;")
-    out_ville.to_sql("PONDERATION_VILLE_RAW", engine, schema="stg", if_exists="append", index=False)
-
-    # Deduplicate region as well
-    out_region = (
-        out_region.groupby(["region", "variete", "annee"], as_index=False)
-        .agg({"poids": "mean", "source_file": "first"})
-    )
-
-    hook.run("TRUNCATE TABLE stg.PONDERATION_REGION_RAW;")
-    if not out_region.empty:
-        out_region.to_sql("PONDERATION_REGION_RAW", engine, schema="stg", if_exists="append", index=False)
-
-    print(f"✅ VILLE_RAW={len(out_ville)}, REGION_RAW={len(out_region)}")
-
-def report(**ctx):
-    print("✅ Ponderation DAG completed successfully.")
-# ---------------------------------------------------------------------
+# =====================================================================
 # DAG
-# ---------------------------------------------------------------------
+# =====================================================================
 with DAG(
-    "etl_silver_ponderations",
-    start_date=datetime(2024,1,1),
+    dag_id="etl_silver_ponderations",
+    description="Silver layer: Load ponderation (weight) CSV files",
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    default_args={"owner":"data-eng"},
-    tags=["observatoire","silver","ponderations"]
+    default_args={"owner": "data-eng", "retries": 1},
+    tags=config.DAG_TAGS["silver"],
 ) as dag:
-    tddl   = PythonOperator(task_id="ddl", python_callable=ddl)
-    tcity  = PythonOperator(task_id="load_city_base", python_callable=load_city_base)
-    tvar   = PythonOperator(task_id="load_variete_base", python_callable=load_variete_base)
-    tbuild = PythonOperator(task_id="build_ville_region_raw", python_callable=build_ville_region_raw)
-    trep   = PythonOperator(task_id="report", python_callable=report)
 
-    tddl >> [tcity, tvar] >> tbuild >> trep
+    t_ensure = PythonOperator(
+        task_id="task_ensure_db_schema",
+        python_callable=task_ensure_db_schema,
+    )
+
+    t_villes = PythonOperator(
+        task_id="task_load_ponderation_villes",
+        python_callable=task_load_ponderation_villes,
+    )
+
+    t_mc = PythonOperator(
+        task_id="task_load_ponderation_mc",
+        python_callable=task_load_ponderation_mc,
+    )
+
+    t_report = PythonOperator(
+        task_id="task_report",
+        python_callable=task_report,
+    )
+
+    # Task dependencies
+    t_ensure >> [t_villes, t_mc] >> t_report

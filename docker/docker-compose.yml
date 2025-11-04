@@ -55,7 +55,8 @@ services:
       - ACCEPT_EULA=Y
       - SA_PASSWORD=${MSSQL_SA_PASSWORD}
       - MSSQL_PID=Developer
-    ports: ["1433:1433"]
+    # Host port changed to avoid local conflicts with existing SQL Server
+    ports: ["11433:1433"]
     volumes:
       - mssql-db-volume:/var/opt/mssql
     healthcheck:
@@ -69,7 +70,7 @@ services:
     image: dbeaver/cloudbeaver:latest
     container_name: cloudbeaver
     ports:
-      - "8978:8978"                 # open http://localhost:8978
+      - "18978:8978"                # open http://localhost:18978
     environment:
       # Allow initial setup without prior login (you can disable later in UI)
       - CB_SERVER_ANONYMOUS_ACCESS=true

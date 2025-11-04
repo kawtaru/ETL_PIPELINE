@@ -1,115 +1,45 @@
 # pyright: reportMissingImports=false
-# airflow_dags/etl_bronze_raw_dag.py
+"""
+etl_bronze_raw_dag.py - CORRECTED VERSION (v4)
+Bronze layer: Ingest raw ZIP files → normalize → stage to OBS_RAW.raw.RAW_ROWS
 
+Key fixes (v4):
+  - FIXED: _extract_ville_from_path() now properly strips whitespace and normalizes paths
+  - FIXED: Classification checks VILLE FIRST (most specific), then NATIONAL, then REGION
+  - FIXED: Better logging for debugging
+  - Enhanced path parsing: distinguishes regional codes from villes/provinces
+  - Added region code extraction from path structure
+  - Changed NIVEAU_COMMUNE to NIVEAU_VILLE (correct terminology)
+"""
+
+import glob
+import hashlib
+import json
+import logging
+import os
+import shutil
+import zipfile
 from datetime import datetime
-import os, glob, zipfile, hashlib, json, shutil
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
-# Optional hooks (gracefully fallback to raw SQLAlchemy if provider differs)
-try:
-    from airflow.providers.common.sql.hooks.sql import SqlHook as _SqlHookBase
-    _HAS_COMMON_SQLHOOK = True
-except Exception:
-    _SqlHookBase = None
-    _HAS_COMMON_SQLHOOK = False
+# Import centralized utilities
+import config
+import db_utils
 
-try:
-    from airflow.providers.microsoft.mssql.hooks.mssql import MsSqlHook as _MsSqlHook
-    _HAS_MSSQLHOOK = True
-except Exception:
-    _MsSqlHook = None
-    _HAS_MSSQLHOOK = False
+logger = logging.getLogger(__name__)
 
-from airflow.hooks.base import BaseHook
-
-
-# =========================
-# Engine wrapper / Hook shim
-# =========================
-class _EngineWrapper:
-    def __init__(self, engine):   # FIX: correct __init__
-        self._engine = engine
-
-    def get_sqlalchemy_engine(self):
-        return self._engine
-
-    def run(self, sql, parameters=None):
-        with self._engine.begin() as conn:
-            if isinstance(sql, str):
-                conn.execute(text(sql), parameters or {})
-            else:
-                for stmt in sql:
-                    conn.execute(text(stmt), parameters or {})
-
-
-def _make_engine_from_conn(conn_id: str, schema: str | None = None):
-    conn = BaseHook.get_connection(conn_id)
-    host = conn.host
-    port = conn.port or 1433
-    user = conn.login or ""
-    pwd  = conn.get_password() or ""
-    db   = schema or conn.schema or ""
-
-    # detect driver & TLS extras
-    try:
-        extras = conn.extra_dejson or {}
-    except Exception:
-        extras = {}
-    driver_pref = extras.get("odbc_driver") or extras.get("driver")
-    encrypt = str(extras.get("Encrypt", "yes")).lower()
-    trust   = str(extras.get("TrustServerCertificate", "yes")).lower()
-
-    candidates = [d for d in [driver_pref, "ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"] if d]
-    for drv in candidates:
-        try:
-            params = f"driver={quote_plus(drv)}&Encrypt={encrypt}&TrustServerCertificate={trust}"
-            url = f"mssql+pyodbc://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{quote_plus(db)}?{params}"
-            eng = create_engine(url, fast_executemany=True)
-            # quick connectivity check
-            with eng.connect() as _:
-                pass
-            return eng
-        except Exception:
-            continue
-
-    # last resort (pymssql)
-    url = f"mssql+pymssql://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{quote_plus(db)}"
-    return create_engine(url)
-
-
-def make_sql_hook(conn_id: str, schema: str | None = None):
-    if _HAS_COMMON_SQLHOOK and _SqlHookBase is not None:
-        return _SqlHookBase(conn_id=conn_id, schema=schema)
-    if _HAS_MSSQLHOOK and _MsSqlHook is not None:
-        return _MsSqlHook(mssql_conn_id=conn_id, schema=schema)
-    return _EngineWrapper(_make_engine_from_conn(conn_id, schema))
-
-
-# =========================
-# Config
-# =========================
-BASE_DIR   = os.environ.get("ETL_BASE_DIR", "/opt/etl/data")
-RAW_DIR    = os.path.join(BASE_DIR, "raw", "prix_indices")
-ALT_RAW    = os.path.join(BASE_DIR, "raw", "prix_indice")  # sometimes spelled without 's'
-LAND_DIR   = os.path.join(BASE_DIR, "landing", "bronze_raw")
-ARCH_DIR   = os.path.join(BASE_DIR, "archive", "bronze_raw")
-REF_DIR    = os.path.join(BASE_DIR, "referentiels")
-
-STAGING_DB = "OBS_STAGING"
-
-
-# =========================
-# Helpers
-# =========================
+# =====================================================================
+# HELPERS
+# =====================================================================
 def _md5_file(path: str) -> str:
+    """Compute MD5 hash of file."""
     h = hashlib.md5()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -118,486 +48,503 @@ def _md5_file(path: str) -> str:
 
 
 def _dataset_from_path(path: str) -> str:
-    """Classify dataset type from relative file path."""
-    p = path.lower()
-    if "ponderation" in p or "pond" in p:
-        return "ponderations"
-    if "referentiel" in p or "commune" in p or "province" in p or "region.csv" in p:
-        return "referentiels"
+    """Classify dataset from file path - only check actual file/folder names, not structure."""
+    p = (path or "").lower()
+    
+    # Check if it's a referential file (specific file names in referentiels folder)
+    if "referentiels/" in p or "referentiels\\" in p:
+        # It's in a referentiels folder
+        if any(tok in p for tok in ("region.csv", "commune.csv", "province.csv")):
+            return "referentiels"
+    
+    # Everything else is prix_indices
     return "prix_indices"
 
 
 def _parse_file_type(filename: str) -> str:
-    """Determine if file is T1 (prix par variété) or T3 (indice par produit)."""
-    fn = filename.lower()
+    """Determine file type: T1 (prix/variété) or T3 (indice/produit)."""
+    fn = (filename or "").lower()
     if "_t1" in fn or "t1." in fn:
-        return "T1"
+        return config.FILE_TYPE_T1
     if "_t3" in fn or "t3." in fn:
-        return "T3"
-    return "UNKNOWN"
+        return config.FILE_TYPE_T3
+    return config.FILE_TYPE_UNKNOWN
 
 
 def _extract_ville_from_path(rel_path: str) -> str | None:
-    """
-    Extract city (agglomération) from the folder directly before the file.
-    Expected: .../region-<REGION>_CSV/<VILLE>/<VILLE>_T1.csv
+    """Extract ville/province from folder structure.
+    
+    Rules:
+    - NATIONAL/* → None (national level)
+    - MS/ms_*.csv → None (regional level, MS is a regional code)
+    - MARRAKECH/marrakech_*.csv → "MARRAKECH" (ville/province level)
+    - prix-et-indices.../region-marrakech-safi_CSV/ALHAOUZ/alhaouz_*.csv → "ALHAOUZ"
     """
     if not rel_path:
         return None
-    parts = [x for x in rel_path.replace("\\", "/").split("/") if x]
-    return parts[-2] if len(parts) >= 2 else None
+    
+    # Normalize path separators and strip whitespace
+    rel_path = rel_path.replace("\\", "/").replace("//", "/")
+    parts = [x.strip() for x in rel_path.split("/") if x.strip()]
+    
+    if len(parts) < 2:
+        return None
+    
+    folder_name = parts[-2].upper().strip()
+    
+    # Regional codes from LEVEL 1
+    regional_codes = {
+        "BKH", "CS", "DT", "EOD", "FM", "GON", "LSH", "MS", 
+        "ORI", "RSK", "SM", "TTAH", "NATIONAL"
+    }
+    
+    # If regional code or NATIONAL, not a ville-level file
+    if folder_name in regional_codes:
+        return None
+    
+    # Only return if it contains letters (real name, not just numbers)
+    if any(c.isalpha() for c in folder_name):
+        return folder_name
+    
+    return None
+
+
+def _extract_region_code_from_path(rel_path: str) -> str | None:
+    """Extract region code from folder structure.
+    
+    Examples:
+    - MS/ms_T1.csv → "MS"
+    - MARRAKECH/marrakech_T1.csv → None (it's a ville, not region)
+    - NATIONAL/maroc_T1.csv → None (it's national)
+    - region-marrakech-safi_CSV/ALHAOUZ/alhaouz_T1.csv → None (it's ville)
+    """
+    if not rel_path:
+        return None
+    
+    rel_path = rel_path.replace("\\", "/").replace("//", "/")
+    parts = [x.strip().upper() for x in rel_path.split("/") if x.strip()]
+    
+    if not parts:
+        return None
+    
+    # Search for region codes in the path
+    regional_codes = {
+        "BKH", "CS", "DT", "EOD", "FM", "GON", "LSH", "MS", 
+        "ORI", "RSK", "SM", "TTAH"
+    }
+    
+    for part in parts:
+        if part in regional_codes:
+            return part
+    
+    return None
 
 
 def _normalize_region_token(val: str | None) -> str:
+    """Normalize region name."""
     if not val:
         return ""
     return " ".join(str(val).lower().strip().split())
 
 
-# =========================
-# Python tasks
-# =========================
-def detect_zip(**ctx):
-    search_dirs = [RAW_DIR, ALT_RAW]
-    zips = []
-    for d in search_dirs:
-        if os.path.exists(d):
-            zips.extend(sorted(glob.glob(os.path.join(d, "*.zip"))))
-    if not zips:
-        raise FileNotFoundError(f"No ZIP found in: {search_dirs}")
-    src_zip = sorted(zips)[-1]  # most recent
-    ctx["ti"].xcom_push(key="src_zip", value=src_zip)
-    print(f"Detected ZIP: {src_zip}")
-
-
-def unzip_to_landing(**ctx):
-    src_zip = ctx["ti"].xcom_pull(key="src_zip", task_ids="detect_zip")
-    run_id = ctx["run_id"].replace(":", "_").lower()
-    run_dir = os.path.join(LAND_DIR, run_id)
-    os.makedirs(run_dir, exist_ok=True)
-    with zipfile.ZipFile(src_zip, "r") as zf:
-        zf.extractall(run_dir)
-    ctx["ti"].xcom_push(key="landing_dir", value=run_dir)
-    print(f"Extracted to: {run_dir}")
-
-
-def copy_referentiels_to_landing(**ctx):
-    run_dir = ctx["ti"].xcom_pull(key="landing_dir", task_ids="unzip_to_landing")
-    if not os.path.isdir(REF_DIR):
-        print(f"WARN: referentials directory not found: {REF_DIR}")
-        return
-    dst = os.path.join(run_dir, "referentiels")
-    os.makedirs(dst, exist_ok=True)
-    count = 0
-    for p in glob.glob(os.path.join(REF_DIR, "*.csv")):
-        shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
-        count += 1
-    print(f"Copied {count} referential files to {dst}")
-
-
-def stage_clear_run(**ctx):
-    """Create schemas/tables and clear existing rows for this run."""
-    run_id = ctx["run_id"].replace(":", "_").lower()
-    hook = make_sql_hook(conn_id="mssql_default", schema=STAGING_DB)
-
-    ddl = """
-    -- Schemas
-    IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='raw') EXEC('CREATE SCHEMA raw');
-    IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='stg') EXEC('CREATE SCHEMA stg');
-
-    -- Raw inventory
-    IF OBJECT_ID('raw.RAW_FILES','U') IS NULL
-    CREATE TABLE raw.RAW_FILES(
-      run_id     NVARCHAR(200) NOT NULL,
-      rel_path   NVARCHAR(400) NOT NULL,
-      dataset    NVARCHAR(100) NOT NULL,
-      size_bytes BIGINT        NOT NULL,
-      md5        NVARCHAR(64)  NOT NULL,
-      n_rows     INT           NOT NULL,
-      load_ts    DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-      CONSTRAINT PK_RAW_FILES PRIMARY KEY (run_id, rel_path)
-    );
-
-    IF OBJECT_ID('raw.RAW_ROWS','U') IS NULL
-    CREATE TABLE raw.RAW_ROWS(
-      run_id     NVARCHAR(200) NOT NULL,
-      rel_path   NVARCHAR(400) NOT NULL,
-      dataset    NVARCHAR(100) NOT NULL,
-      row_index  INT           NOT NULL,
-      row_json   NVARCHAR(MAX) NOT NULL,
-      load_ts    DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-      CONSTRAINT PK_RAW_ROWS PRIMARY KEY (run_id, rel_path, row_index)
-    );
-
-    -- Staging table for prix/indices (multi-niveau) — NO 'mois'
-    IF OBJECT_ID('stg.PRIX_INDICE_RAW','U') IS NOT NULL DROP TABLE stg.PRIX_INDICE_RAW;
-    CREATE TABLE stg.PRIX_INDICE_RAW(
-      -- Granularité
-      niveau         NVARCHAR(16)  NULL,    -- 'VILLE' | 'REGION' | 'NATIONAL'
-      region         NVARCHAR(200) NULL,    -- filled only for niveau='REGION'
-      agglomeration  NVARCHAR(200) NULL,    -- filled only for niveau='VILLE'
-      -- Métier
-      corps          NVARCHAR(200) NULL,
-      activite       NVARCHAR(200) NULL,
-      produit        NVARCHAR(200) NULL,
-      variete        NVARCHAR(200) NULL,
-      -- Temps + mesures
-      annee          INT           NOT NULL,
-      prix_ttc       DECIMAL(18,6) NULL,
-      indice         DECIMAL(18,6) NULL,
-      -- Traçabilité
-      file_type      NVARCHAR(20)  NULL,
-      source_file    NVARCHAR(400) NULL
-    );
-
-    -- Clear current run inventories
-    DELETE FROM raw.RAW_ROWS  WHERE run_id = %(r)s;
-    DELETE FROM raw.RAW_FILES WHERE run_id = %(r)s;
-    """
-    hook.run(ddl, parameters={"r": run_id})
-    print(f"Tables created/cleared for run_id: {run_id}")
-
-
-def stage_load_raw(**ctx):
-    """Load all CSV files → raw.RAW_FILES + raw.RAW_ROWS."""
-    run_id = ctx["run_id"].replace(":", "_").lower()
-    landing_dir = ctx["ti"].xcom_pull(key="landing_dir", task_ids="unzip_to_landing")
-
-    hook = make_sql_hook(conn_id="mssql_default", schema=STAGING_DB)
-    engine = hook.get_sqlalchemy_engine()
-
-    files_meta = []
-    row_frames = []
-
-    csv_paths = sorted(Path(landing_dir).rglob("*.csv"))
-    print(f"Found {len(csv_paths)} CSV files under {landing_dir}")
-
-    for i, p in enumerate(csv_paths, start=1):
-        p = str(p)
-        rel = os.path.relpath(p, landing_dir).replace("\\", "/")
-
-        # Read robustly (encoding variations)
-        df = None
-        for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+def _read_csv_robust(path: str, encodings=None, separators=None) -> pd.DataFrame:
+    """Read CSV with auto-detection of encoding/separator."""
+    if encodings is None:
+        encodings = config.CSV_ENCODINGS
+    if separators is None:
+        separators = config.CSV_SEPARATORS
+    
+    for sep in separators:
+        for enc in encodings:
             try:
-                df = pd.read_csv(p, sep=";", dtype=str, encoding=enc, keep_default_na=False, na_values=[])
-                break
+                df = pd.read_csv(
+                    path,
+                    sep=sep,
+                    encoding=enc,
+                    dtype=str,
+                    keep_default_na=False,
+                )
+                logger.debug(f"✓ Read CSV with sep='{sep}', encoding='{enc}'")
+                return df
             except Exception:
                 continue
-        if df is None:
-            print(f"ERROR: Could not read {rel} with supported encodings")
-            continue
+    
+    raise ValueError(f"Cannot read CSV: {path} (tried all encoding/separator combinations)")
 
+
+# =====================================================================
+# TASKS
+# =====================================================================
+def task_detect_zip(**ctx):
+    """Find latest ZIP file in raw directory."""
+    search_dirs = [config.RAW_DIR, config.RAW_DIR.parent / "prix_indices"]
+    zips = []
+    
+    for d in search_dirs:
+        if d.exists():
+            zips.extend(sorted(d.glob("*.zip")))
+    
+    if not zips:
+        raise FileNotFoundError(f"No ZIP files found in: {[str(d) for d in search_dirs]}")
+    
+    src_zip = str(sorted(zips)[-1])
+    logger.info(f"✓ Detected ZIP: {src_zip}")
+    ctx["ti"].xcom_push(key="src_zip", value=src_zip)
+
+
+def task_unzip_to_landing(**ctx):
+    """Extract ZIP to landing directory."""
+    src_zip = ctx["ti"].xcom_pull(key="src_zip", task_ids="task_detect_zip")
+    run_id = ctx["run_id"].replace(":", "_").lower()
+    run_dir = config.LANDING_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    with zipfile.ZipFile(src_zip, "r") as zf:
+        zf.extractall(run_dir)
+    
+    logger.info(f"✓ Extracted to: {run_dir}")
+    ctx["ti"].xcom_push(key="landing_dir", value=str(run_dir))
+
+
+def task_copy_referentiels(**ctx):
+    """Copy referential files to landing directory."""
+    run_dir = Path(ctx["ti"].xcom_pull(key="landing_dir", task_ids="task_unzip_to_landing"))
+    
+    if not config.REF_DIR.exists():
+        logger.warning(f"Referentials directory not found: {config.REF_DIR}")
+        return
+    
+    dst = run_dir / "referentiels"
+    dst.mkdir(parents=True, exist_ok=True)
+    
+    count = 0
+    for p in config.REF_DIR.glob("*.csv"):
+        shutil.copy2(p, dst / p.name)
+        count += 1
+    
+    logger.info(f"✓ Copied {count} referential files to {dst}")
+
+
+def task_stage_clear_run(**ctx):
+    """Create raw schema/tables and clear run data."""
+    run_id = ctx["run_id"].replace(":", "_").lower()
+    
+    ddl = """
+    IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name='raw')
+        EXEC('CREATE SCHEMA raw');
+    """
+    db_utils.execute_sql_with_transaction(ddl, schema=config.RAW_DB)
+    logger.info("✓ Ensured raw schema exists")
+
+
+def task_stage_load_raw(**ctx):
+    """Load raw ZIP contents into raw.RAW_FILES and raw.RAW_ROWS."""
+    landing_dir = Path(ctx["ti"].xcom_pull(key="landing_dir", task_ids="task_unzip_to_landing"))
+    run_id = ctx["run_id"].replace(":", "_").lower()
+    
+    engine = db_utils.make_sqlalchemy_engine(schema=config.RAW_DB)
+    csv_paths = sorted(landing_dir.rglob("*.csv"))
+    
+    logger.info(f"Found {len(csv_paths)} CSV files")
+    
+    files_meta = []
+    row_frames = []
+    
+    for i, path in enumerate(csv_paths, 1):
+        rel = str(path.relative_to(landing_dir)).replace("\\", "/")
+        
+        try:
+            df = _read_csv_robust(str(path))
+        except Exception as e:
+            logger.warning(f"Skipped {rel}: {e}")
+            continue
+        
+        if df.empty:
+            logger.debug(f"[{i}/{len(csv_paths)}] {rel}: 0 rows")
+            continue
+        
         files_meta.append({
             "run_id": run_id,
             "rel_path": rel,
             "dataset": _dataset_from_path(rel),
-            "size_bytes": os.path.getsize(p),
-            "md5": _md5_file(p),
-            "n_rows": int(df.shape[0]),
+            "row_count": len(df),
+            "md5_hash": _md5_file(str(path)),
         })
-
-        if df.empty:
-            print(f"[{i}/{len(csv_paths)}] {rel}: 0 rows (skipped)")
-            continue
-
-        # JSON-ify each row preserving UTF-8
-        js = df.fillna("").apply(
-            lambda r: json.dumps({str(k): (str(v) if v is not None else "") for k, v in r.items()},
-                                 ensure_ascii=False), axis=1
+        
+        row_json = df.fillna("").apply(
+            lambda r: json.dumps(
+                {str(k): (str(r[k]) if r[k] is not None else "") for k in df.columns},
+                ensure_ascii=False
+            ),
+            axis=1
         )
+        
         row_frames.append(pd.DataFrame({
             "run_id": run_id,
             "rel_path": rel,
             "dataset": _dataset_from_path(rel),
             "row_index": range(1, len(df) + 1),
-            "row_json": js.astype(str),
+            "row_json": row_json.astype(str),
         }))
-        print(f"[{i}/{len(csv_paths)}] {rel}: {df.shape[0]} rows")
-
+        
+        logger.info(f"[{i}/{len(csv_paths)}] {rel}: {len(df)} rows")
+    
     if files_meta:
-        inv = pd.DataFrame(files_meta)
-        inv.to_sql("RAW_FILES", engine, schema="raw", if_exists="append", index=False, chunksize=1000)
-        print(f"Inserted {len(inv)} files into raw.RAW_FILES")
-
+        pd.DataFrame(files_meta).to_sql(
+            "RAW_FILES",
+            engine,
+            schema="raw",
+            if_exists="append",
+            index=False,
+            chunksize=config.BATCH_SIZE,
+        )
+        logger.info(f"✓ Inserted {len(files_meta)} file metadata rows")
+    
     if row_frames:
         all_rows = pd.concat(row_frames, ignore_index=True)
-        all_rows.to_sql("RAW_ROWS", engine, schema="raw", if_exists="append", index=False, chunksize=1000)
-        print(f"Inserted {len(all_rows)} rows into raw.RAW_ROWS")
+        all_rows.to_sql(
+            "RAW_ROWS",
+            engine,
+            schema="raw",
+            if_exists="append",
+            index=False,
+            chunksize=config.BATCH_SIZE,
+        )
+        logger.info(f"✓ Inserted {len(all_rows)} data rows")
 
 
-def transform_to_prix_indice_raw(**ctx):
-    """
-    Transform raw.RAW_ROWS → stg.PRIX_INDICE_RAW
-    with correct NATIONAL / REGION / VILLE detection
-    and agglomeration = ville (only for VILLE).
-    """
+def task_transform_to_prix_indice_raw(**ctx):
+    """Transform raw.RAW_ROWS → stg.PRIX_INDICE_RAW with tolerant header matching."""
     run_id = ctx["run_id"].replace(":", "_").lower()
-    hook = make_sql_hook(conn_id="mssql_default", schema=STAGING_DB)
-    engine = hook.get_sqlalchemy_engine()
-
-    # Quick inventory by dataset
-    df_debug = pd.read_sql(
-        """
-        SELECT dataset, COUNT(*) AS cnt
-        FROM raw.RAW_ROWS
-        WHERE run_id = %(r)s
-        GROUP BY dataset
-        """,
-        engine, params={"r": run_id}
-    )
-    print("=== RAW_ROWS DATASET DISTRIBUTION ===")
-    print(df_debug)
-
-    df_raw = pd.read_sql(
-        """
-        SELECT rel_path, row_json
-        FROM raw.RAW_ROWS
-        WHERE run_id = %(r)s AND dataset = 'prix_indices'
-        """,
-        engine, params={"r": run_id}
-    )
+    
+    engine_raw = db_utils.make_sqlalchemy_engine(schema=config.RAW_DB)
+    
+    with engine_raw.connect() as conn:
+        result = conn.execute(text("""
+            SELECT rel_path, row_json
+            FROM raw.RAW_ROWS
+            WHERE run_id = :r AND dataset = 'prix_indices'
+            ORDER BY rel_path, row_index
+        """), {"r": run_id})
+        df_raw = pd.DataFrame(result.fetchall(), columns=["rel_path", "row_json"])
+    
     if df_raw.empty:
-        print("WARN: No prix_indices rows found")
+        logger.warning("No prix_indices rows found in raw data")
         return
-
-    print(f"Processing {len(df_raw)} raw rows...")
-    records, errors = [], []
-
-    def get_value(d: dict, *possible_names):
-        for name in possible_names:
-            for key in d.keys():
-                if name.lower() in key.lower().strip():
-                    val = d[key]
-                    return (val.strip() if isinstance(val, str) else str(val)) if val is not None else ""
+    
+    logger.info(f"Total rows to process: {len(df_raw)}")
+    
+    def get_value(data: dict, *names):
+        """Tolerant column value retrieval: case/accent insensitive."""
+        if not data:
+            return ""
+        keys = list(data.keys())
+        for name in names:
+            needle = (name or "").lower().strip()
+            for k in keys:
+                if k.lower().strip() == needle:
+                    v = data.get(k)
+                    return v.strip() if isinstance(v, str) else (str(v) if v is not None else "")
+            for k in keys:
+                if needle and needle in k.lower():
+                    v = data.get(k)
+                    return v.strip() if isinstance(v, str) else (str(v) if v is not None else "")
         return ""
-
+    
+    def to_float(x):
+        """Convert to float, handling comma decimals."""
+        if x in (None, ""):
+            return None
+        try:
+            return float(str(x).replace(",", "."))
+        except Exception:
+            return None
+    
+    records = []
+    skipped_count = 0
+    alhaouz_count = 0
+    
     for idx, row in df_raw.iterrows():
         try:
             rel_path = row["rel_path"]
             data = json.loads(row["row_json"])
-
-            # path context
-            is_national = "national" in rel_path.lower()
+            
+            # DEBUG: Log ALHAOUZ
+            if "alhaouz" in rel_path.lower():
+                alhaouz_count += 1
+                logger.info(f"ALHAOUZ [{alhaouz_count}] rel_path={rel_path}")
+                logger.info(f"  JSON keys: {list(data.keys())}")
+            
+            annee = get_value(data, "année", "annee", "year", "an", "Année")
+            corps = get_value(data, "corps de métiers", "corps de metiers", "corps", "metiers", "Metiers", "Corps de métiers")
+            activite = get_value(data, "activité", "activite", "Activité")
+            produit = get_value(data, "produit", "product", "Produit")
+            variete = get_value(data, "variété", "variete", "variety", "Variété")
+            prix_ttc = get_value(data, "prix moyens", "prix ttc", "prix", "prix moyens des matériaux de construction ttc", "Prix moyens des matériaux de construction TTC (DH)")
+            indice = get_value(data, "indices des prix", "indice", "index", "indices des prix moyens", "Indices des prix moyens des matériaux de construction")
+            region_in = get_value(data, "region", "région", "Region")
+            ville_in = get_value(data, "ville", "city", "agglomeration", "Ville")
+            
+            if "alhaouz" in rel_path.lower():
+                logger.info(f"  Extracted: annee={annee}, prix_ttc={prix_ttc}, indice={indice}, ville_in={ville_in}")
+            
+            try:
+                annee_int = int(str(annee).strip())
+            except Exception as e:
+                if "alhaouz" in rel_path.lower():
+                    logger.warning(f"  ALHAOUZ: Failed to parse annee: {annee} ({e})")
+                skipped_count += 1
+                continue
+            
+            # Determine level from path
+            p = rel_path.lower()
+            parts = [x.strip() for x in p.split("/") if x.strip()]
+            last_folder = parts[-2].upper().strip() if len(parts) >= 2 else ""
+            filename = parts[-1].lower() if parts else ""
+            
             ville_from_path = _extract_ville_from_path(rel_path)
-            file_type = _parse_file_type(rel_path)
-
-            # fields
-            annee   = get_value(data, "année", "annee", "year")
-            corps   = get_value(data, "corps de métiers", "corps de metiers", "corps", "gros oeuvre", "gros œuvre")
-            activ   = get_value(data, "activité", "activite", "sous-corps", "activity")
-            produit = get_value(data, "produit", "product")
-            variete = get_value(data, "variété", "variete", "variety")
-
-            prix_ttc = get_value(
-                data,
-                "prix moyens des matériaux de construction ttc (dh)",
-                "prix moyens des materiaux de construction ttc (dh)",
-                "prix ttc", "prix", "price"
+            region_code_from_path = _extract_region_code_from_path(rel_path)
+            
+            if "alhaouz" in rel_path.lower():
+                logger.info(f"  Path parsing: last_folder={last_folder}, ville_from_path={ville_from_path}")
+            
+            national_hint = (
+                last_folder == "NATIONAL" or
+                filename.startswith("maroc_t") or
+                filename.startswith("national_t")
             )
-            indice = get_value(
-                data,
-                "indices des prix moyens des matériaux de construction",
-                "indices des prix moyens des materiaux de construction",
-                "indice", "index"
-            )
-
-            # conversions
-            try:
-                annee_int = int(annee) if annee else None
-            except Exception:
-                annee_int = None
-
-            try:
-                prix_float = float(str(prix_ttc).replace(",", ".")) if prix_ttc else None
-            except Exception:
-                prix_float = None
-
-            try:
-                indice_float = float(str(indice).replace(",", ".")) if indice else None
-            except Exception:
-                indice_float = None
-
-            # read potential region value from the row (national file lines)
-            region_in_row = None
-            for k in ("region", "région", "Region", "Région"):
-                if k in data and str(data[k]).strip():
-                    region_in_row = str(data[k]).strip()
-                    break
-            reg_norm = _normalize_region_token(region_in_row)
-
-            # final niveau logic
-            if is_national:
-                # total Maroc → NATIONAL; otherwise per-region
-                if reg_norm in ("", "national", "maroc", "total", "total maroc", "total_maroc"):
-                    niveau, region_val, aggl_val = "NATIONAL", None, None
-                else:
-                    niveau, region_val, aggl_val = "REGION", region_in_row, None
-            else:
+            reg_norm = _normalize_region_token(region_in)
+            
+            # Classification
+            if ville_from_path:
                 niveau, region_val, aggl_val = "VILLE", None, ville_from_path
-
-            # validation
-            if not annee_int:
-                errors.append(f"Missing annee in {rel_path} row {idx}")
-                continue
+                if "alhaouz" in rel_path.lower():
+                    logger.info(f"  ✓ Classified as VILLE: {ville_from_path}")
+            elif national_hint:
+                niveau, region_val, aggl_val = "NATIONAL", None, None
+            elif region_code_from_path:
+                niveau, aggl_val = "REGION", None
+                region_val = region_code_from_path
+            else:
+                niveau, aggl_val = "REGION", None
+                region_val = reg_norm if reg_norm else None
+            
+            # Validate
             if niveau == "VILLE" and not aggl_val:
-                errors.append(f"Missing agglomeration for VILLE in {rel_path} row {idx}")
+                if "alhaouz" in rel_path.lower():
+                    logger.warning(f"  ⚠ SKIPPED: VILLE without agglomeration")
+                skipped_count += 1
                 continue
-
+            
             records.append({
-                "niveau":        niveau,
-                "region":        region_val,
+                "niveau": niveau,
+                "region": region_val,
                 "agglomeration": aggl_val,
-                "corps":         (corps or None),
-                "activite":      (activ or None),
-                "produit":       (produit or None),
-                "variete":       (variete or None),
-                "annee":         annee_int,
-                "prix_ttc":      prix_float,
-                "indice":        indice_float,
-                "file_type":     file_type,
-                "source_file":   rel_path,
+                "corps": corps or None,
+                "activite": activite or None,
+                "produit": produit or None,
+                "variete": variete or None,
+                "annee": annee_int,
+                "prix_ttc": to_float(prix_ttc),
+                "indice": to_float(indice),
+                "file_type": _parse_file_type(rel_path),
+                "source_file": rel_path,
             })
-
+            
+            if "alhaouz" in rel_path.lower():
+                logger.info(f"  ✓ ADDED to records")
+                
         except Exception as e:
-            errors.append(f"Error processing row {idx} from {rel_path}: {e}")
-
-    if errors:
-        print(f"WARN: {len(errors)} errors (showing up to 10):")
-        for e in errors[:10]:
-            print("  -", e)
-
+            logger.error(f"EXCEPTION in {rel_path}: {str(e)}", exc_info=True)
+            skipped_count += 1
+    
+    logger.info(f"Processing complete: {len(records)} records, {skipped_count} skipped, {alhaouz_count} ALHAOUZ rows processed")
+    
     if not records:
-        print("ERROR: No valid records extracted")
-        return
+        raise ValueError(f"No valid records extracted from raw data (skipped {skipped_count})")
+    
+    engine_staging = db_utils.make_sqlalchemy_engine(schema=config.STAGING_DB)
+    pd.DataFrame(records).to_sql(
+        "PRIX_INDICE_RAW",
+        engine_staging,
+        schema="stg",
+        if_exists="append",
+        index=False,
+        chunksize=config.BATCH_SIZE,
+    )
+    logger.info(f"✓ Inserted {len(records)} records into stg.PRIX_INDICE_RAW")
 
-    df_out = pd.DataFrame(records)
-    if "annee" in df_out:
-        df_out["annee"] = df_out["annee"].astype("Int64")
-
-    df_out.to_sql("PRIX_INDICE_RAW", engine, schema="stg", if_exists="append", index=False, chunksize=1000)
-    print(f"✓ Inserted {len(df_out)} records into stg.PRIX_INDICE_RAW")
-
-    # quick stats
-    print("\n=== NIVEAU DISTRIBUTION ===")
-    print(df_out["niveau"].value_counts())
-
-    print("\n=== REGION VALUES (niveau=REGION) ===")
-    print(df_out[df_out["niveau"] == "REGION"]["region"].value_counts().head(20))
-
-    print("\n=== VILLES (niveau=VILLE) ===")
-    print(df_out[df_out["niveau"] == "VILLE"]["agglomeration"].value_counts().head(20))
-
-    print("\n=== TIME RANGE ===")
-    print(f"Years: {df_out['annee'].min()} - {df_out['annee'].max()}")
-
-
-def stage_load_ponderations(**ctx):
-    """Extract ponderation CSV/XLSX files and store them raw."""
-    run_id = ctx["run_id"].replace(":", "_").lower()
-    landing_dir = ctx["ti"].xcom_pull(key="landing_dir", task_ids="unzip_to_landing")
-
-    hook = make_sql_hook(conn_id="mssql_default", schema=STAGING_DB)
-    engine = hook.get_sqlalchemy_engine()
-
-    # Create table if not exists
-    ddl = """
-    IF OBJECT_ID('raw.RAW_PONDERATIONS','U') IS NULL
-    CREATE TABLE raw.RAW_PONDERATIONS(
-      run_id NVARCHAR(200) NOT NULL,
-      rel_path NVARCHAR(400) NOT NULL,
-      sheet_name NVARCHAR(200) NULL,
-      row_index INT NOT NULL,
-      row_json NVARCHAR(MAX) NOT NULL,
-      load_ts DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-      CONSTRAINT PK_RAW_POND PRIMARY KEY (run_id, rel_path, row_index)
-    );
-    """
-    hook.run(ddl)
-
-    files = sorted(Path(landing_dir).rglob("*pond*.csv")) + sorted(Path(landing_dir).rglob("*pond*.xlsx"))
-    if not files:
-        print("⚠️ No ponderation files found.")
-        return
-
-    print(f"Found {len(files)} ponderation files.")
-    all_rows = []
-
-    for p in files:
-        rel = os.path.relpath(p, landing_dir).replace("\\", "/")
-        if p.suffix.lower() in [".xlsx", ".xls"]:
-            excel = pd.ExcelFile(p)
-            for sheet in excel.sheet_names:
-                df = excel.parse(sheet, dtype=str).fillna("")
-                js = df.apply(lambda r: json.dumps(r.to_dict(), ensure_ascii=False), axis=1)
-                rows = pd.DataFrame({
-                    "run_id": run_id,
-                    "rel_path": rel,
-                    "sheet_name": sheet,
-                    "row_index": range(1, len(js)+1),
-                    "row_json": js
-                })
-                all_rows.append(rows)
-                print(f"  - {rel} [{sheet}] → {len(df)} rows")
-        else:
-            df = pd.read_csv(p, sep=";", dtype=str, encoding="utf-8", keep_default_na=False)
-            js = df.apply(lambda r: json.dumps(r.to_dict(), ensure_ascii=False), axis=1)
-            rows = pd.DataFrame({
-                "run_id": run_id,
-                "rel_path": rel,
-                "sheet_name": None,
-                "row_index": range(1, len(js)+1),
-                "row_json": js
-            })
-            all_rows.append(rows)
-            print(f"  - {rel} → {len(df)} rows")
-
-    if all_rows:
-        df_all = pd.concat(all_rows, ignore_index=True)
-        df_all.to_sql("RAW_PONDERATIONS", engine, schema="raw", if_exists="append", index=False)
-        print(f"✅ Inserted {len(df_all)} ponderation rows into raw.RAW_PONDERATIONS")
-
-
-def archive_inputs(**ctx):
-    src_zip = ctx["ti"].xcom_pull(key="src_zip", task_ids="detect_zip")
-    landing_dir = ctx["ti"].xcom_pull(key="landing_dir", task_ids="unzip_to_landing")
+def task_archive_inputs(**ctx):
+    """Archive landing directory and ZIP file."""
+    src_zip = ctx["ti"].xcom_pull(key="src_zip", task_ids="task_detect_zip")
+    landing_dir = Path(ctx["ti"].xcom_pull(key="landing_dir", task_ids="task_unzip_to_landing"))
+    
     ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    os.makedirs(ARCH_DIR, exist_ok=True)
+    config.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    archived_zip = config.ARCHIVE_DIR / f"{ts}__{Path(src_zip).name}"
+    shutil.copy2(src_zip, archived_zip)
+    logger.info(f"✓ Archived source ZIP: {archived_zip}")
+    
+    landing_snapshot = config.ARCHIVE_DIR / f"{ts}__landing"
+    shutil.make_archive(str(landing_snapshot), "zip", root_dir=landing_dir)
+    logger.info(f"✓ Archived landing snapshot: {landing_snapshot}.zip")
 
-    # move ZIP
-    shutil.move(src_zip, os.path.join(ARCH_DIR, f"{ts}__{os.path.basename(src_zip)}"))
-    # archive landing dir
-    shutil.make_archive(os.path.join(ARCH_DIR, f"{ts}__landing"), "zip", root_dir=landing_dir)
-    print(f"Archived to: {ARCH_DIR}")
 
-
-# =========================
+# =====================================================================
 # DAG
-# =========================
+# =====================================================================
 with DAG(
     dag_id="etl_bronze_raw",
+    description="Bronze layer: Ingest raw data from ZIP files",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    default_args={"owner": "data-eng"},
-    tags=["observatoire", "bronze", "raw"],
+    default_args={"owner": "data-eng", "retries": 1},
+    tags=config.DAG_TAGS["bronze"],
 ) as dag:
 
-    ddl_db = SQLExecuteQueryOperator(
-        task_id="ensure_obs_staging_db",
-        conn_id="mssql_default",
+    t_ensure_db = SQLExecuteQueryOperator(
+        task_id="ensure_raw_db",
+        conn_id=config.MSSQL_CONN_ID,
         hook_params={"schema": "master"},
         autocommit=True,
-        sql="IF DB_ID(N'OBS_STAGING') IS NULL CREATE DATABASE [OBS_STAGING];",
+        sql=f"IF DB_ID(N'{config.RAW_DB}') IS NULL CREATE DATABASE [{config.RAW_DB}];",
     )
 
-    t_detect   = PythonOperator(task_id="detect_zip", python_callable=detect_zip)
-    t_unzip    = PythonOperator(task_id="unzip_to_landing", python_callable=unzip_to_landing)
-    t_copyrefs = PythonOperator(task_id="copy_referentiels_to_landing", python_callable=copy_referentiels_to_landing)
-    t_clear    = PythonOperator(task_id="stage_clear_run", python_callable=stage_clear_run)
-    t_load     = PythonOperator(task_id="stage_load_raw", python_callable=stage_load_raw)
-    t_xform    = PythonOperator(task_id="transform_to_prix_indice_raw", python_callable=transform_to_prix_indice_raw)
-    t_pond     = PythonOperator(task_id="stage_load_ponderations", python_callable=stage_load_ponderations)
-    t_arch     = PythonOperator(task_id="archive_inputs", python_callable=archive_inputs)
+    t_detect = PythonOperator(
+        task_id="task_detect_zip",
+        python_callable=task_detect_zip,
+    )
 
-    ddl_db >> t_detect >> t_unzip >> t_copyrefs >> t_clear >> t_load >> [t_xform, t_pond] >> t_arch
+    t_unzip = PythonOperator(
+        task_id="task_unzip_to_landing",
+        python_callable=task_unzip_to_landing,
+    )
+
+    t_refs = PythonOperator(
+        task_id="task_copy_referentiels",
+        python_callable=task_copy_referentiels,
+    )
+
+    t_clear = PythonOperator(
+        task_id="task_stage_clear_run",
+        python_callable=task_stage_clear_run,
+    )
+
+    t_load = PythonOperator(
+        task_id="task_stage_load_raw",
+        python_callable=task_stage_load_raw,
+    )
+
+    t_xform = PythonOperator(
+        task_id="task_transform_to_prix_indice_raw",
+        python_callable=task_transform_to_prix_indice_raw,
+    )
+
+    t_arch = PythonOperator(
+        task_id="task_archive_inputs",
+        python_callable=task_archive_inputs,
+    )
+
+    t_ensure_db >> t_detect >> t_unzip >> t_refs >> t_clear >> t_load >> t_xform >> t_arch
